@@ -192,21 +192,6 @@ var Hash = (function () {
         this.finish(out);
         return out;
     };
-    // Internal function for use in HMAC for optimization.
-    Hash.prototype._saveState = function (out) {
-        for (var i = 0; i < this.state.length; i++) {
-            out[i] = this.state[i];
-        }
-    };
-    // Internal function for use in HMAC for optimization.
-    Hash.prototype._restoreState = function (from, bytesHashed) {
-        for (var i = 0; i < this.state.length; i++) {
-            this.state[i] = from[i];
-        }
-        this.bytesHashed = bytesHashed;
-        this.finished = false;
-        this.bufferLength = 0;
-    };
     return Hash;
 }());
 
