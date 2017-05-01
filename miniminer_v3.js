@@ -1,5 +1,3 @@
-/* jshint bitwise : false */
-/* jshint esversion : 6 */
 var debug = true;
 var Utils = {
 	stringToInts: function (input) {
@@ -37,7 +35,7 @@ var Utils = {
 	}
 };
 
-var Data ,target, _ticks = 0,share;
+var Data ,target, _ticks;
 
 var _averageSpeed = 0; //hs
 var login = "1BhKdW7omrkQrWa3VtS8PwtDuMDCK2uRu1:ANYTHING@localhost:80/getwork.php";
@@ -47,107 +45,62 @@ var Url = "http://" + login.substr(urlStart + 1);
 var User = login.substr(0, passwordStart);
 var Password = login.substr(passwordStart + 1, urlStart - passwordStart - 1);
 var _maxAge = 20000; //ms
-var _batchSize = 1000000;
 var xhr = new XMLHttpRequest();
 var retryTime = 30000;
-var _lastPrint = Date.now();
-var _nonce = 0;
-var workid = 0;
-var sending_share = false;
-var getting_work = false;
+
+var pc = 2;
+var hpt = 4294967296 / pc;
+var threads = new Array(pc);
 
 var cmd = {
-	new_work : 0,
-	send_share : 1,
-	finished : 2,
-	update : 3
-};
-var cmd2str = ["new_work","send_share","finished","update"];
-var threads = new Array(1);
-var hpt = 4294967296 / threads.length;//hashes per thread
-GetWork(function(){ //всё начинается здесь
-	for(let i = 0;i < threads.length; i++){
+	get_work 	: 0,
+	send_share	: 1,
+	new_work	: 2
+}
+var fresh_data = 0;
+function init(){
+	for(let i = 0; i < pc; i++){
 		threads[i] = new Worker('worker.js');
-		threads[i].onmessage = function(arg){	//по возвращении worker доложится о цели своего прибытия
-			console.log(cmd2str[arg.data[0]],arg.data.slice(1));
-			if(arg.data[0] == cmd.send_share){	//если worker хочет отправить share
-				this.idle = true;	//он простаивает до тех пор,пока не придёт ответ с pool'а. Экономия ресурсов в надежде на положительный ответ
-				if(sending_share === false){//если никто ещё не озадачен этим
-					//то что будет отправлено. Помещается в переменную,что бы не генерировать снова в случае сбоя отправки
-					share = Utils.AddPadding(Utils.EndianFlip32BitChunks(Utils.intsToString(Data)+Utils.intToString(_nonce)));
-					SendShare(arg.data[1]);
-					sending_share = true;	//говорит остальным простаивать по возращении
+		threads[i].idle = true;
+		threads[i].onmessage = function(e){
+			if(e.data[0] == cmd.get_work){
+				if(fresh_data != 0){
+					fresh_data--;
+					update_data(i);
+				}else{
+					threads[i].idle = true;
+					GetWork(true);
 				}
-			}else if(arg.data[0] == cmd.finished || (Date.now() - _ticks) >= _maxAge){//если worker проверил всё,что ему было велено,и ничего не нашёл (о чём и сообщил) или не успел
-				if(debug)console.log("Work outdated.Passed "+(Date.now() - _ticks)+" ms");
-				this.idle = true;	//он простаивает
-				if(getting_work === false){//если никто ещё не озадачен этим
-					GetWork(update_pending);//до тех пор,пока не прийдёт запрошенная в этой строке новая работа
-					getting_work = true;	//все простаивают
-				}
-			}else if(arg.data[0] == cmd.update){	//если worker спрашивает : "нет ли более новой работы?"
-				this.idle = false;	//раз срок действия работы не истёк (раз мы сюда дошли),скучать ему не придётся
-				if(this.workid != workid)this.update_work();	//если работа сменилась за время отсутствия,то так и сообщаем
-				else this.postMessage([-1]);			//иначе пусть работать продолжает
-				//console.log("Nonce: " + Utils.intToString(arg.data[1]) + "/ffffffff " + ((_nonce / 4294967295) * 100).toFixed(2) + "%");
-				var speed = Math.floor((_batchSize * 1000) / (Date.now() - _lastPrint)); /*=_batchSize div ((now - _lastPrint) div 1000)*/
-				_averageSpeed = (_averageSpeed + speed) >> 1; //div 2
-				console.log("Speed of worker number "+i+" = " + (speed / 1000) + " Kh/s");
-				_lastPrint = Date.now();
+			}else if(e.data[0] == cmd.send_share){
+				threads[i].idle = true;
+				SendShare(e.data[1]);
+				GetWork(true);
 			}
-		};
-		(threads[i].update_work = function(){
-			console.log(cmd.new_work,hpt*i,(hpt*(i+1))-1,Data[16],Data[17],Data[18],midstate,target);
-			threads[i].postMessage([
-				cmd.new_work,
-				hpt*i,
-				(hpt*(i+1))-1,
-				Data[16],
-				Data[17],
-				Data[18],
-				midstate,
-				target
-			]);
-			threads[i].idle = false;
-			threads[i].workid = workid;
-		})();
+		}
 	}
-});
-
-function update_pending(){
-	GetWork(function(){
-		for(let i = 0; i < threads.length; i++)if(threads[i].idle)threads[i].update_work();
-	});
 }
 
-function terminate(){threads[0].terminate();clearTimeout(getwork_timeout);}
+function update_data(i){
+	threads[i].postMessage([
+		cmd.new_work,
+		hpt*i,
+		(hpt*(i+1))-1,
+		Data[16],
+		Data[17],
+		Data[18],
+		midstate,
+		target,
+		_ticks + _maxAge
+	]);
+}
 
-var getwork_timeout,prev_data = "";
-
-function GetWork(callback) {
-	clearTimeout(getwork_timeout);
-	console.log("Requesting Work from Pool...");
-	if (debug) {
-		console.log("Server URL: " + Url);
-		console.log("User: " + User);
-		console.log("Password: " + Password);
-	}
-	InvokeMethod("getwork", function () {
-		data = JSON.parse(xhr.response);
-		if(data.data != prev_data){
-			console.log(data.data);
-			console.log(prev_data);
-			Data = Utils.stringToInts(Utils.EndianFlip32BitChunks(Utils.RemovePadding(data.data))).slice(0,20);
-			sha256d_init(Data);
-			target = Utils.stringToInts(Utils.EndianFlip32BitChunks(data.target));
-			workid++;
+function update_pending(){
+	for(let i = 0; i < pc; i++)
+		if(threads[i].idle){
+			threads[i].idle = false;
+			update_data(i);
 		}
-		_ticks = Date.now();
-		getting_work = false;
-		if(callback !== undefined)callback();
-		getwork_timeout = setTimeout(GetWork,_maxAge);
-		prev_data = data.data;
-	}, GetWork);
+	fresh_data = 0;
 }
 
 function InvokeMethod(method, onSuccess, onError, paramString) {
@@ -175,17 +128,43 @@ function InvokeMethod(method, onSuccess, onError, paramString) {
 	xhr.send("{\"id\": 0, \"method\": \"" + method + "\", \"params\": [" + ((paramString !== void 0) ? ("\"" + paramString + "\"") : "") + "]}");
 }
 
-function SendShare(_nonce,onerror) {
+var getting_work = false;
+var getwork_timeout;
+var requestStart;
+var averageRequestTime = 0;
+function GetWork(callback) {
+	if(getting_work)return;
+	else getting_work = true;
+	requestStart = Date.now();
+	clearTimeout(getwork_timeout);
+	getwork_timeout = setTimeout(GetWork,_maxAge - averageRequestTime);
+	console.log("Requesting Work from Pool...");
+	InvokeMethod("getwork", function () {
+		var data = JSON.parse(xhr.response);
+		Data = Utils.stringToInts(Utils.EndianFlip32BitChunks(Utils.RemovePadding(data.data))).slice(0,20);
+		sha256d_init(Data);
+		target = Utils.stringToInts(Utils.EndianFlip32BitChunks(data.target));
+		getting_work = false;
+		fresh_data = pc;
+		_ticks = Date.now();
+		averageRequestTime = (averageRequestTime + _ticks - requestStart) >> 1;
+		if(callback)update_pending();
+	}, GetWork);
+}
+
+function SendShare(_nonce) {
 	console.log("Sending Share to Pool...");
 	InvokeMethod("getwork", function () {
-		if (JSON.parse(xhr.response).result === true){
+		if (JSON.parse(xhr.response).result === true)
 			console.log("Server accepted the Share!");
-			sending_share = false;
-			update_pending();
-		}else{
-			console.error("Server declined the Share!");
-			onerror();//шукаємо далі
-		}
-		
-	}, SendShare, share);
+		else
+			console.error("Server declined the Share!");//значит,в алгоритме серьёзная ошибка...
+
+	}, SendShare, Utils.AddPadding(Utils.EndianFlip32BitChunks(Utils.intsToString(/*Current*/Data)+Utils.intToString(_nonce))));
 }
+
+init();
+console.log("Server URL: " + Url);
+console.log("User: " + User);
+console.log("Password: " + Password);
+GetWork(true);
